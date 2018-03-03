@@ -1,0 +1,193 @@
+#PredictTheCriminal-A-HackerEarth-Challenge#
+
+library(Boruta)
+library(caret)
+library(randomForest)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(RColorBrewer)
+library(gridExtra)
+library(MASS)
+library(Metrics)
+
+train<-read.csv("criminal_train.csv",header=TRUE)
+test<-read.csv("criminal_test.csv",header=TRUE)
+train$Criminal<-as.factor(train$Criminal)
+test.Criminal <- data.frame(Criminal = rep("None", nrow(test)), test[,])
+data.combined <- rbind(train, test.Criminal)
+str(data.combined)
+
+#Conducting Boruta importance test to select important features#
+
+set.seed(123)
+ boruta.train <- Boruta(Criminal~.-PERID, data = train, doTrace = 2)
+ print(boruta.train)
+ plot(boruta.train, xlab = "", xaxt = "n")
+ lz<-lapply(1:ncol(boruta.train$ImpHistory),function(i)
+ boruta.train$ImpHistory[is.finite(boruta.train$ImpHistory[,i]),i])
+ names(lz) <- colnames(boruta.train$ImpHistory)
+ Labels <- sort(sapply(lz,median))
+ axis(side = 1,las=2,labels = names(Labels),
+ at = 1:ncol(boruta.train$ImpHistory), cex.axis = 0.7)
+ final.boruta <- TentativeRoughFix(boruta.train)
+ print(final.boruta)
+ boruta.df <- attStats(final.boruta)
+ print(boruta.df)
+ 
+ #Eliminating those attributes confirmed unimportant#
+ 
+ train2<-train[c(-5,-9,-30,-32,-36,-39,-40,-49,-52,-59,-63,-67,-68,-70,-71)]
+ combine<-data.combined[c(-5,-9,-30,-32,-36,-39,-40,-49,-52,-59,-63,-67,-68,-70,-71)]
+  
+ #Splitting training dataset in 7:3 ratio#
+ 
+ training <- combine[1:45718, ]
+ testing <- combine[45719:57148, ]
+ set.seed(222)
+ inTrain <- createDataPartition(y = training$Criminal, p = 0.7, list = FALSE)
+ Training <- training[inTrain, ]
+ Validation <- training[-inTrain, ]
+ 
+ #Testing correlation amongst selected features with dplyr package#
+ 
+  train2 %>% 
+     dplyr::select(-PERID,-Criminal) %>%
+     cor(use = 'pairwise.complete.obs') -> M
+   
+   corrplot(M, type="lower", method="color",
+            col=brewer.pal(n=8, name="RdBu"),diag=FALSE)
+   
+   sort(M[ncol(M),-ncol(M)]) %>%  
+     as.data.frame %>% 
+     `names<-`('correlation') %>%
+     ggplot(aes(x = reorder(row.names(.), -correlation), y = correlation, fill = correlation)) + 
+     geom_bar(stat='identity', colour = 'black') + scale_fill_continuous(guide = FALSE) + scale_y_continuous(limits =  c(-.15,.25)) +
+     labs(title = 'formation_energy_ev_natom\n Correlations', x = NULL, y = NULL) + coord_flip() -> cor1
+   
+   grid.arrange(cor1,nrow=1)
+  
+  #Selecting highly correlated features for a random forest training#
+  
+   rf.train.2 <- trainDF[c("PRXYDATA","POVERTY3","IRMCDCHP","IRFAMIN3","GOVTPROG","IIWELMOS","IRWELMOS","IRFAMSVC","PRXRETRY","IRFAMPMT","HLCNOTMO","IROTHHLT","HLTINNOS","IIFAMIN3")]
+   set.seed(178)
+   rf.label<-as.factor(trainDF$Criminal)
+   rf.2<- randomForest(x = rf.train.2, y = rf.label, importance = TRUE, ntree = 200)
+   rf.2
+   varImpPlot(rf.2)
+   
+    # Make predictions
+   rf.preds <- predict(rf.2,testing)
+   table(rf.preds)
+   
+   #Preparing a cross-validated model for gradient boosting and knn#
+   #Creating a dummy variable because the target variable needs to be preserved for future use#
+   
+   Dummy <- dummyVars("~.",data=combine, fullRank=F)
+   CriminalDF <- as.data.frame(predict(Dummy,combine))
+   print(names(CriminalDF))
+   
+   prop.table(table(CriminalDF$Criminal.1))
+   
+   outcomeName <- 'Criminal'
+   predictorsNames <- names(train2)[c(-1,-58,-57)]
+   
+   train2$Criminal.1 <- ifelse(train2$Criminal==1,'Y','N')
+   train2$Criminal.1 <- as.factor(train2$Criminal.1)
+   outcomeName <- 'Criminal.1'
+   
+   set.seed(128)
+   splitIndex <- createDataPartition(train2[,outcomeName], p = .7, list = FALSE, times = 1)
+   trainDF <- train2[ splitIndex,]
+   testDF  <- train2[-splitIndex,]
+         
+   objControl <- trainControl(method='cv', number=3, returnResamp='none', summaryFunction = twoClassSummary, classProbs = TRUE)
+   
+   gbmmodel<- train(trainDF[,predictorsNames], trainDF[,outcomeName], 
+                     method='gbm', 
+                     trControl=objControl,  
+                     metric = "ROC",
+                     preProc = c("center", "scale"))
+   preds.gbm <- predict(object=gbmmodel, testing[,predictorsNames], type='raw')
+   head(preds.gbm)
+   
+   print(postResample(pred=preds.gbm, obs=as.factor(testDF[,outcomeName])))
+   
+   summary(objModel)
+   print(objModel)
+   
+   predictions <- predict(object=objModel, testDF[,predictorsNames], type='raw')
+   head(predictions)
+   postResample(pred=predictions, obs=as.factor(testDF[,outcomeName]))
+   
+   # probabilities 
+   predictions <- predict(object=objModel, testDF[,predictorsNames], type='prob')
+   head(predictions)
+   postResample(pred=predictions[[2]], obs=ifelse(testDF[,outcomeName]=='Y',1,0))
+   knnmodel<-train(trainDF[,predictorsNames],trainDF[,outcomeName],method='knn',trControl=objControl,tuneLength=3)
+   
+   #Predicting using knn model
+   preds.knn<-predict(object = model_knn,testing[,predictorsNames])
+   
+   head(preds.knn)
+   print(postResample(pred=preds.knn, obs=as.factor(testDF[,outcomeName])))
+   
+   #Changing the factor levels 'Y' 'N' again to '1' '0' respectively
+   
+    levels(preds.gbm)<-c('0','1')
+   levels(preds.knn)<-c('0','1')
+   
+   #writing out a file for submission to HackerEarth#
+   #Target variable for each of the models is included, any one should be selected for final submission#
+   
+   submit.df <- data.frame(PerId<-test[,c(1)],Criminal.gbm=preds.gbm,Criminal.knn=preds.knn,Criminal.rf=rf.preds)
+   write.csv(submit.df,file="HackerEarth_Criminal_Sub1.csv",row.names=FALSE)
+  
+  #Each of these models score a precision metric of 0.95223 on the Leaderboard#
+  
+  #Method 2- Testing a stacked model with lr ,rf and knn at the base level and gbm or lr at the top level#
+  
+   fitControl <- trainControl(
+     method = "cv",
+     number = 3,
+     savePredictions = 'final', # To save out of fold predictions for best parameter combinantions
+     classProbs = T # To save the class probabilities of the out of fold predictions
+   )
+   outcome<-training$Criminal
+   model_rf<-train(trainDF[c("PRXYDATA","POVERTY3","IRMCDCHP","IRFAMIN3","GOVTPROG","IIWELMOS","IRWELMOS","IRFAMSVC","PRXRETRY","IRFAMPMT","HLCNOTMO","IROTHHLT","HLTINNOS","IIFAMIN3")],trainDF[,outcomeName],method='rf',trControl=fitControl,tuneLength=3)
+                   
+       #Training the knn model
+ model_knn<-train(trainDF[,predictorsNames],trainDF[,outcomeName],method='knn',trControl=fitControl,tuneLength=3)
+ 
+ 
+                   #Training the logistic regression model
+ model_lr<-train(trainDF[,predictorsNames],trainDF[,outcomeName],method='glm',trControl=fitControl,tuneLength=3)
+ trainDF$OOF_pred_rf<-model_rf$pred$Y[order(model_rf$pred$rowIndex)]
+ trainDF$OOF_pred_knn<-model_knn$pred$Y[order(model_knn$pred$rowIndex)]
+ trainDF$OOF_pred_lr<-model_lr$pred$Y[order(model_lr$pred$rowIndex)]
+ 
+ testDF$OOF_pred_rf<-predict(model_rf,testDF[predictorsNames],type='prob')$Y
+ testDF$OOF_pred_knn<-predict(model_knn,testDF[predictorsNames],type='prob')$Y
+ testDF$OOF_pred_lr<-predict(model_lr,testDF[predictorsNames],type='prob')$Y
+ 
+ predictors_top<-c('OOF_pred_rf','OOF_pred_knn','OOF_pred_lr') 
+  
+
+ model_gbm<- train(trainDF[,predictors_top],trainDF[,outcomeName],method='gbm',trControl=fitControl,tuneLength=3)
+ 
+testing$gbm_stacked<-predict(model_gbm,testing[,predictors_top])
+ testing$glm_stacked<-predict(model_glm,testing[,predictors_top])
+ 
+ levels(testing$gbm_stacked)<-c('0','1')
+ levels(testing$glm_stacked)<-c('0','1')
+ 
+ submit.df <- data.frame(PERID<-test[,c(1)],Criminal=testing$gbm_stacked)
+ write.csv(submit.df,file="HackerEarth_Criminal_Sub5.csv",row.names=FALSE)
+ 
+ #The stacked model scores a precision metric of 0.94261 on LeaderBoard but parameters can be tweaked and different models may be stacked for a better score#
+
+  
+  
+  
+  
+  
